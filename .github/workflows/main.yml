@@ -80,6 +80,6 @@ jobs:
         with:
           name: gki-kernel-6.6-artifacts
           path: |
-            bazel-bin/common/kernel_aarch64_dist/Image
-            bazel-bin/common/kernel_aarch64_dist/*.ko
+            bazel-bin/
+            bazel-bin/
           retention-days: 5
