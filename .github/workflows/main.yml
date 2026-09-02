@@ -16,14 +16,17 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git git-lfs rsync curl repo python3 python3-pip libssl-dev bison flex bc build-essential zip unzip ca-certificates
+          sudo apt-get install -y git git-lfs rsync curl python3 python3-pip libssl-dev bison flex bc build-essential zip unzip ca-certificates
+          sudo curl https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
 
       - name: Initialize and Sync Android 15 Kernel Source
         run: |
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6-lts
+          # Inicializando com a branch correta do manifesto GKI
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6-lts --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: Create Kernel Config Fragments (Docker, LXC, LCD & EVDI)
+      - name: Create Kernel Config Fragments (Docker, LXC, LCD, EVDI, KVM EL2 & MTK)
         run: |
           # Fragmento para suporte ao Docker e LXC (Containers) dentro do Android
           cat << 'EOF' > common/docker_lxc_support.config
@@ -68,6 +71,25 @@ jobs:
           CONFIG_DRM=y
           CONFIG_DRM_KMS_HELPER=y
           CONFIG_FB=y
+          EOF
+
+          # Fragmento para Virtualização (KVM no EL2) e compatibilidade MediaTek (MTK)
+          cat << 'EOF' > common/kvm_mtk_support.config
+          # ARM64 KVM EL2 Virtualization Core
+          CONFIG_VIRTUALIZATION=y
+          CONFIG_KVM=y
+          CONFIG_HAVE_KVM_IRQCHIP=y
+          CONFIG_HAVE_KVM_IRQ_BYPASS=y
+          CONFIG_HAVE_KVM_MSI=y
+          CONFIG_KVM_MMIO=y
+          CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT=y
+          CONFIG_KVM_XFER_TO_GUEST_MODE=y
+          
+          # MediaTek IOMMU / MTK Virtualization Extensions
+          CONFIG_MTK_IOMMU=y
+          CONFIG_MTK_IOMMU_V2=y
+          CONFIG_ARM_SMMU=y
+          CONFIG_IOMMU_SUPPORT=y
           EOF
 
       - name: Execute Bazel/Kleaf Compile
