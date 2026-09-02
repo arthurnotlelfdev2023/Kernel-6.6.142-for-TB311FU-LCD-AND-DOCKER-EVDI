@@ -1,0 +1,102 @@
+# ==============================================================================
+# GKI 6.6 LTS (Android 15) - Pipeline de Compilação com Suporte a Docker e LCD
+# ==============================================================================
+
+pipeline_info:
+  name: "GKI 6.6 LTS Compilation Pipeline"
+  target_os: "Android 15 (aarch64)"
+  build_system: "Bazel / Kleaf"
+
+image:
+  base: "ubuntu:22.04"
+  env:
+    DEBIAN_FRONTEND: "noninteractive"
+    USER: "root"
+    LC_ALL: "C.UTF-8"
+
+# ------------------------------------------------------------------------------
+# 1. Dependências do Sistema (Necessárias para o Kleaf/Bazel do Android 15)
+# ------------------------------------------------------------------------------
+dependencies:
+  apt_packages:
+    - git
+    - git-lfs
+    - repo
+    - rsync
+    - curl
+    - python3
+    - python3-pip
+    - libssl-dev
+    - bison
+    - flex
+    - bc
+    - build-essential
+    - zip
+    - unzip
+    - ca-certificates
+
+# ------------------------------------------------------------------------------
+# 2. Configurações Customizadas do Kernel (Fragmentos Injetados no Build)
+# ------------------------------------------------------------------------------
+kernel_configuration:
+  base_defconfig: "common/arch/arm64/configs/gki_defconfig"
+  
+  # Opções de Kernel exigidas para rodar Docker dentro do Android
+  docker_support_fragments:
+    - CONFIG_BRIDGE=y
+    - CONFIG_VETH=y
+    - CONFIG_TUN=y
+    - CONFIG_IP_NF_TARGET_MASQUERADE=y
+    - CONFIG_NETFILTER_XT_MATCH_COMMENT=y
+    - CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+    - CONFIG_NETFILTER_XT_MARK=y
+    - CONFIG_NETFILTER_XT_CONNMARK=y
+    - CONFIG_CGROUP_DEVICE=y
+    - CONFIG_MEMCG=y
+    - CONFIG_MEMCG_SWAP=y
+    - CONFIG_OVERLAY_FS=y
+
+  # Opções de Kernel para habilitar suporte a displays LCD/DRM Panel
+  lcd_support_fragments:
+    - CONFIG_DRM_PANEL=y
+    - CONFIG_DRM_PANEL_ORIENTATION_QUIRKS=y
+    - CONFIG_BACKLIGHT_CLASS_DEVICE=y
+    - CONFIG_LCD_CLASS_DEVICE=y
+    - CONFIG_DRM_MIPI_DSI=y
+
+# ------------------------------------------------------------------------------
+# 3. Passos do Processo de Inicialização e Download (Manifesto Android 15)
+# ------------------------------------------------------------------------------
+source_sync_steps:
+  - name: "Inicializar o repositório do Kernel Android 15-6.6"
+    cmd: "repo init -u https://googlesource.com -b android15-6.6"
+  
+  - name: "Sincronizar código-fonte (Kernel, Bazel Toolchains e Clang Integrado)"
+    cmd: "repo sync -c -j$(nproc) --no-tags --no-clone-bundle"
+
+# ------------------------------------------------------------------------------
+# 4. Passos de Preparação e Execução do Build Bazel
+# ------------------------------------------------------------------------------
+build_execution:
+  pre_build:
+    - name: "Criar fragmentos de configuração de forma dinâmica"
+      cmd: |
+        echo -e "# Docker Support\nCONFIG_BRIDGE=y\nCONFIG_VETH=y\nCONFIG_TUN=y\nCONFIG_IP_NF_TARGET_MASQUERADE=y\nCONFIG_NETFILTER_XT_MATCH_COMMENT=y\nCONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y\nCONFIG_NETFILTER_XT_MARK=y\nCONFIG_NETFILTER_XT_CONNMARK=y\nCONFIG_CGROUP_DEVICE=y\nCONFIG_MEMCG=y\nCONFIG_MEMCG_SWAP=y\nCONFIG_OVERLAY_FS=y" > common/docker_support.config
+        echo -e "# LCD Support\nCONFIG_DRM_PANEL=y\nCONFIG_DRM_PANEL_ORIENTATION_QUIRKS=y\nCONFIG_BACKLIGHT_CLASS_DEVICE=y\nCONFIG_LCD_CLASS_DEVICE=y\nCONFIG_DRM_MIPI_DSI=y" > common/lcd_support.config
+
+    - name: "Garantir permissões de execução para o wrapper do Bazel"
+      cmd: "chmod +x tools/bazel"
+
+  compile:
+    - name: "Executar compilação GKI aarch64 via Kleaf"
+      cmd: "tools/bazel build --config=fast //common:kernel_aarch64_dist"
+
+# ------------------------------------------------------------------------------
+# 5. Artefatos Gerados (Saída do Build)
+# ------------------------------------------------------------------------------
+artifacts:
+  output_directory: "bazel-bin/common/kernel_aarch64_dist/"
+  targets:
+    - "Image"           # O binário do kernel GKI limpo
+    - "Image.lz4"       # Kernel compactado (se aplicável)
+    - "*.ko"            # Módulos de kernel (.ko) compilados em conformidade com o GKI
