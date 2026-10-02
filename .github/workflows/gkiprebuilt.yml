@@ -1,0 +1,124 @@
+name: Android15-6.6-Docker-LXC
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      os_patch_level:
+        required: false
+        type: string
+        description: >
+          Patch level of common kernel manifest,
+          for example: 2026-03
+      os_version:
+        required: true
+        type: string
+        default: 15.0.0
+        description: >
+          OS Version of boot image
+          for example: 15.0.0
+      custom:
+        required: true
+        type: boolean
+        default: true
+        description: >
+          Enable LXC, Docker and LXD features
+
+jobs:
+  Build-Kernel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximizar Espaço em Disco
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 16384
+          temp-reserve-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Instalar Dependências
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/*
+          sudo apt update -qq
+          sudo apt install -qq wget curl git rsync python3 python3-pip -y
+          curl -o repo https://googleapis.com
+          chmod a+x repo
+          sudo mv repo /usr/local/bin/
+
+      - name: Sincronizar Código Fonte do Kernel
+        run: |
+          mkdir android-kernel && cd android-kernel
+          repo init --depth 1 -u https://googlesource.com -b android15-6.6
+          repo sync -c -j$(nproc --all) --no-clone-bundle --no-tags --fail-fast
+
+      - name: Aplicar Configurações Docker/LXC/LXD
+        if: ${{ github.event.inputs.custom == 'true' || github.event_name == 'schedule' }}
+        run: |
+          DEFCONFIG_PATH="./android-kernel/common/arch/arm64/configs/gki_defconfig"
+          echo "Appending Docker/LXC/LXD options to $DEFCONFIG_PATH..."
+          cat <<EOF >> $DEFCONFIG_PATH
+          # Docker, LXC & LXD Support Configurations
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_USER_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_MEMCG=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_OVERLAY_FS=y
+          EOF
+
+      - name: Salvar Modificações no Git
+        if: ${{ github.event.inputs.custom == 'true' || github.event_name == 'schedule' }}
+        run: |
+          git config --global user.email "cloudorzi@gmail.com"
+          git config --global user.name "1orz"
+          cd android-kernel/common
+          git add .
+          git commit -m "Configure Docker and LXC Containers Support" || true
+
+      - name: Compilar Kernel (Kleaf/Bazel)
+        run: |
+          cd android-kernel
+          tools/bazel build //common:kernel_aarch64_dist
+
+      - name: Montar Imagem boot.img
+        run: |
+          cd android-kernel
+          mkdir -p tools/mkbootimg
+          curl -o tools/mkbootimg/mkbootimg.py https://googlesource.com | base64 --decode > tools/mkbootimg/mkbootimg.py
+          curl -o tools/mkbootimg/unpack_bootimg.py https://googlesource.com | base64 --decode > tools/mkbootimg/unpack_bootimg.py
+          chmod +x tools/mkbootimg/*.py
+          
+          cd tools/mkbootimg
+          PATCH_LEVEL=${{ github.event.inputs.os_patch_level || '2025-01' }}
+          # Baixa uma imagem de boot oficial e certificada do Google para extração do Ramdisk
+          wget -q https://google.com{PATCH_LEVEL}_r1.zip -O gki-boot.zip || wget -q https://google.com -O gki-boot.zip
+          unzip -q gki-boot.zip
+          ./unpack_bootimg.py --boot_img boot*.img
+          ./mkbootimg.py --header_version 4 --os_version ${{ github.event.inputs.os_version || '15.0.0' }} --os_patch_level ${PATCH_LEVEL} --kernel ../../bazel-bin/common/kernel_aarch64_dist/Image --ramdisk out/ramdisk --output boot.img
+
+      - name: Preparar Artefatos Finais
+        run: |
+          mkdir -p artifacts
+          cp android-kernel/bazel-bin/common/kernel_aarch64_dist/Image artifacts/
+          cp android-kernel/tools/mkbootimg/boot.img artifacts/
+
+      - name: Fazer Upload do Kernel e boot.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-lxc-android15-6.6
+          path: artifacts
