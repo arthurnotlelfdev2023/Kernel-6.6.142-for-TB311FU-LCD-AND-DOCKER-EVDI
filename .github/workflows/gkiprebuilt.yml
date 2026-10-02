@@ -1,124 +1,417 @@
-name: Android15-6.6-Docker-LXC
+name: Android15-6.6-LTS-Custom
 
 on:
   schedule:
     - cron: "0 0 * * *"
+
   workflow_dispatch:
     inputs:
       os_patch_level:
         required: false
         type: string
         description: >
-          Patch level of common kernel manifest,
-          for example: 2026-03
+          Patch level of common Android 15 6.6 LTS kernel manifest,
+          for example: 2026-07
+
       os_version:
         required: true
         type: string
-        default: 15.0.0
+        default: "15.0.0"
         description: >
-          OS Version of boot image
+          OS Version of boot image,
           for example: 15.0.0
+
       custom:
         required: true
         type: boolean
         default: true
         description: >
-          Enable LXC, Docker and LXD features
+          Enable LXC, Docker features
+
+      kernelsu:
+        required: true
+        type: boolean
+        default: true
+        description: >
+          Enable KernelSU
+
+      kernelsu_branch:
+        required: false
+        type: string
+        default: dev
+        description: >
+          Branch or version of KernelSU to use,
+          for example: stable, dev, v1.0.3
+
+      kernelsu_next:
+        required: true
+        type: boolean
+        default: true
+        description: >
+          Enable KernelSU-Next
+
+      kernelsu_next_branch:
+        required: false
+        type: string
+        default: dev
+        description: >
+          Branch or version of KernelSU-Next to use,
+          for example: stable, dev, v1.0.3
+
+env:
+  KERNEL_BRANCH: common-android15-6.6-lts
+  KERNEL_DIR: android-kernel
+  KERNEL_CONFIG: gki_defconfig-android15-6.6
 
 jobs:
-  Build-Kernel:
+
+  KernelSU:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@main
 
-      - name: Maximizar Espaço em Disco
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 16384
-          temp-reserve-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-
-      - name: Instalar Dependências
+      - name: Install Dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo rm -rf /etc/apt/sources.list.d/*
           sudo apt update -qq
-          sudo apt install -qq wget curl git rsync python3 python3-pip -y
-          curl -o repo https://googleapis.com
+          sudo apt install -qq wget curl unzip git
+
+          curl -LSs https://storage.googleapis.com/git-repo-downloads/repo \
+            -o repo
+
           chmod a+x repo
-          sudo mv repo /usr/local/bin/
+          sudo mv repo /usr/local/bin/repo
 
-      - name: Sincronizar Código Fonte do Kernel
+      - name: Sync Android 15 6.6 LTS kernel
         run: |
-          mkdir android-kernel && cd android-kernel
-          repo init --depth 1 -u https://googlesource.com -b android15-6.6
-          repo sync -c -j$(nproc --all) --no-clone-bundle --no-tags --fail-fast
+          mkdir -p "${KERNEL_DIR}"
+          cd "${KERNEL_DIR}"
 
-      - name: Aplicar Configurações Docker/LXC/LXD
+          PATCH_LEVEL="${{ github.event.inputs.os_patch_level }}"
+
+          if [ -n "${PATCH_LEVEL}" ]; then
+            MANIFEST_BRANCH="${KERNEL_BRANCH}-${PATCH_LEVEL}"
+          else
+            MANIFEST_BRANCH="${KERNEL_BRANCH}"
+          fi
+
+          echo "Using manifest: ${MANIFEST_BRANCH}"
+
+          repo init \
+            --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b "${MANIFEST_BRANCH}"
+
+          repo sync \
+            -c \
+            -j"$(nproc --all)" \
+            --no-clone-bundle \
+            --optimized-fetch
+
+      - name: Apply patches and configuration files
         if: ${{ github.event.inputs.custom == 'true' || github.event_name == 'schedule' }}
         run: |
-          DEFCONFIG_PATH="./android-kernel/common/arch/arm64/configs/gki_defconfig"
-          echo "Appending Docker/LXC/LXD options to $DEFCONFIG_PATH..."
-          cat <<EOF >> $DEFCONFIG_PATH
-          # Docker, LXC & LXD Support Configurations
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_USER_NS=y
-          CONFIG_NET_NS=y
-          CONFIG_PID_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_CGROUP_PIDS=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_FREEZER=y
-          CONFIG_MEMCG=y
-          CONFIG_VETH=y
-          CONFIG_BRIDGE=y
-          CONFIG_OVERLAY_FS=y
-          EOF
+          mkdir -p \
+            "${KERNEL_DIR}/common/arch/arm64/configs"
 
-      - name: Salvar Modificações no Git
-        if: ${{ github.event.inputs.custom == 'true' || github.event_name == 'schedule' }}
+          cp \
+            "${GITHUB_WORKSPACE}/config/${KERNEL_CONFIG}" \
+            "${KERNEL_DIR}/common/arch/arm64/configs/gki_defconfig"
+
+          cd "${KERNEL_DIR}/common"
+
+          if compgen -G "${GITHUB_WORKSPACE}/patches/android15-6.6/*.patch" > /dev/null; then
+            git apply \
+              "${GITHUB_WORKSPACE}"/patches/android15-6.6/*.patch
+          else
+            echo "No Android 15 6.6 patches found."
+          fi
+
+      - name: Use KernelSU
+        if: ${{ github.event.inputs.kernelsu == 'true' || github.event_name == 'schedule' }}
+        run: |
+          cd "${KERNEL_DIR}/common"
+
+          BRANCH="${{ github.event.inputs.kernelsu_branch }}"
+
+          if [ "${BRANCH}" = "stable" ]; then
+            echo "Using KernelSU stable."
+            curl -LSs \
+              "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+              | bash
+
+          elif [ "${BRANCH}" = "dev" ]; then
+            echo "Using KernelSU dev."
+            curl -LSs \
+              "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+              | bash -s main
+
+          else
+            echo "Using KernelSU: ${BRANCH}"
+            curl -LSs \
+              "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+              | bash -s "${BRANCH}"
+          fi
+
+      - name: Commit changes
+        if: ${{ github.event.inputs.custom == 'true' || github.event.inputs.kernelsu == 'true' || github.event_name == 'schedule' }}
         run: |
           git config --global user.email "cloudorzi@gmail.com"
           git config --global user.name "1orz"
-          cd android-kernel/common
+
+          cd "${KERNEL_DIR}/common"
+
           git add .
-          git commit -m "Configure Docker and LXC Containers Support" || true
 
-      - name: Compilar Kernel (Kleaf/Bazel)
-        run: |
-          cd android-kernel
-          tools/bazel build //common:kernel_aarch64_dist
+          git commit \
+            -m "Custom Android 15 6.6 LTS Kernel" \
+            || echo "Nothing to commit."
 
-      - name: Montar Imagem boot.img
+          git status
+
+      - name: Build Kernel
         run: |
-          cd android-kernel
-          mkdir -p tools/mkbootimg
-          curl -o tools/mkbootimg/mkbootimg.py https://googlesource.com | base64 --decode > tools/mkbootimg/mkbootimg.py
-          curl -o tools/mkbootimg/unpack_bootimg.py https://googlesource.com | base64 --decode > tools/mkbootimg/unpack_bootimg.py
-          chmod +x tools/mkbootimg/*.py
-          
-          cd tools/mkbootimg
-          PATCH_LEVEL=${{ github.event.inputs.os_patch_level || '2025-01' }}
-          # Baixa uma imagem de boot oficial e certificada do Google para extração do Ramdisk
-          wget -q https://google.com{PATCH_LEVEL}_r1.zip -O gki-boot.zip || wget -q https://google.com -O gki-boot.zip
+          cd "${KERNEL_DIR}"
+
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/config.sh savedefconfig
+
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh -j"$(nproc)"
+
+      - name: Build boot.img
+        run: |
+          cd "${KERNEL_DIR}/tools/mkbootimg"
+
+          PATCH_LEVEL="${{ github.event.inputs.os_patch_level }}"
+
+          if [ -z "${PATCH_LEVEL}" ]; then
+            PATCH_LEVEL="2026-07"
+          fi
+
+          echo "Using boot OS patch level: ${PATCH_LEVEL}"
+
+          # Download the matching GKI boot image.
+          # Set GKI_BOOT_URL to the exact Google-certified boot
+          # image for the patch level you are targeting.
+          if [ -z "${GKI_BOOT_URL}" ]; then
+            echo "GKI_BOOT_URL is not configured."
+            echo "A Google-certified Android 15 6.6 boot image is required."
+            exit 1
+          fi
+
+          wget -q \
+            "${GKI_BOOT_URL}" \
+            -O gki-boot.zip
+
           unzip -q gki-boot.zip
-          ./unpack_bootimg.py --boot_img boot*.img
-          ./mkbootimg.py --header_version 4 --os_version ${{ github.event.inputs.os_version || '15.0.0' }} --os_patch_level ${PATCH_LEVEL} --kernel ../../bazel-bin/common/kernel_aarch64_dist/Image --ramdisk out/ramdisk --output boot.img
 
-      - name: Preparar Artefatos Finais
+          ./unpack_bootimg.py \
+            --boot_img boot*.img
+
+          ./mkbootimg.py \
+            --header_version 4 \
+            --os_version "${{ github.event.inputs.os_version || '15.0.0' }}" \
+            --os_patch_level "${PATCH_LEVEL}" \
+            --kernel \
+              "${GITHUB_WORKSPACE}/${KERNEL_DIR}/out/android15-6.6/dist/Image" \
+            --ramdisk out/ramdisk \
+            --output boot.img
+
+      - name: Prepare artifacts
         run: |
           mkdir -p artifacts
-          cp android-kernel/bazel-bin/common/kernel_aarch64_dist/Image artifacts/
-          cp android-kernel/tools/mkbootimg/boot.img artifacts/
 
-      - name: Fazer Upload do Kernel e boot.img
-        uses: actions/upload-artifact@v4
+          cp \
+            "${KERNEL_DIR}/out/android15-6.6/dist/Image" \
+            artifacts/Image
+
+          cp \
+            "${KERNEL_DIR}/tools/mkbootimg/boot.img" \
+            artifacts/boot.img
+
+      - name: Upload KernelSU artifacts
+        uses: actions/upload-artifact@main
         with:
-          name: docker-lxc-android15-6.6
-          path: artifacts
+          name: kernelsu-android15-6.6-lts${{ github.event.inputs.os_patch_level && github.event.inputs.os_patch_level != '' && '-' || '' }}${{ github.event.inputs.os_patch_level || '' }}
+          path: artifacts/
+
+
+  KernelSU-Next:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Install Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo rm -rf /etc/apt/sources.list.d/*
+          sudo apt update -qq
+          sudo apt install -qq wget curl unzip git
+
+          curl -LSs \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o repo
+
+          chmod a+x repo
+          sudo mv repo /usr/local/bin/repo
+
+      - name: Sync Android 15 6.6 LTS kernel
+        run: |
+          mkdir -p "${KERNEL_DIR}"
+          cd "${KERNEL_DIR}"
+
+          PATCH_LEVEL="${{ github.event.inputs.os_patch_level }}"
+
+          if [ -n "${PATCH_LEVEL}" ]; then
+            MANIFEST_BRANCH="${KERNEL_BRANCH}-${PATCH_LEVEL}"
+          else
+            MANIFEST_BRANCH="${KERNEL_BRANCH}"
+          fi
+
+          echo "Using manifest: ${MANIFEST_BRANCH}"
+
+          repo init \
+            --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b "${MANIFEST_BRANCH}"
+
+          repo sync \
+            -c \
+            -j"$(nproc --all)" \
+            --no-clone-bundle \
+            --optimized-fetch
+
+      - name: Apply patches and configuration files
+        if: ${{ github.event.inputs.custom == 'true' || github.event_name == 'schedule' }}
+        run: |
+          mkdir -p \
+            "${KERNEL_DIR}/common/arch/arm64/configs"
+
+          cp \
+            "${GITHUB_WORKSPACE}/config/${KERNEL_CONFIG}" \
+            "${KERNEL_DIR}/common/arch/arm64/configs/gki_defconfig"
+
+          cd "${KERNEL_DIR}/common"
+
+          if compgen -G "${GITHUB_WORKSPACE}/patches/android15-6.6/*.patch" > /dev/null; then
+            git apply \
+              "${GITHUB_WORKSPACE}"/patches/android15-6.6/*.patch
+          else
+            echo "No Android 15 6.6 patches found."
+          fi
+
+      - name: Use KernelSU Next
+        if: ${{ github.event.inputs.kernelsu_next == 'true' || github.event_name == 'schedule' }}
+        run: |
+          cd "${KERNEL_DIR}/common"
+
+          BRANCH="${{ github.event.inputs.kernelsu_next_branch }}"
+
+          if [ "${BRANCH}" = "stable" ]; then
+            echo "Using KernelSU-Next stable."
+            curl -LSs \
+              "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+              | bash
+
+          elif [ "${BRANCH}" = "dev" ]; then
+            echo "Using KernelSU-Next dev."
+            curl -LSs \
+              "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+              | bash -s next
+
+          else
+            echo "Using KernelSU-Next: ${BRANCH}"
+            curl -LSs \
+              "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" \
+              | bash -s "${BRANCH}"
+          fi
+
+      - name: Commit changes
+        if: ${{ github.event.inputs.custom == 'true' || github.event.inputs.kernelsu_next == 'true' || github.event_name == 'schedule' }}
+        run: |
+          git config --global user.email "cloudorzi@gmail.com"
+          git config --global user.name "1orz"
+
+          cd "${KERNEL_DIR}/common"
+
+          git add .
+
+          git commit \
+            -m "Custom Android 15 6.6 LTS Kernel" \
+            || echo "Nothing to commit."
+
+          git status
+
+      - name: Build Kernel
+        run: |
+          cd "${KERNEL_DIR}"
+
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/config.sh savedefconfig
+
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+            build/build.sh -j"$(nproc)"
+
+      - name: Build boot.img
+        run: |
+          cd "${KERNEL_DIR}/tools/mkbootimg"
+
+          PATCH_LEVEL="${{ github.event.inputs.os_patch_level }}"
+
+          if [ -z "${PATCH_LEVEL}" ]; then
+            PATCH_LEVEL="2026-07"
+          fi
+
+          echo "Using boot OS patch level: ${PATCH_LEVEL}"
+
+          if [ -z "${GKI_BOOT_URL}" ]; then
+            echo "GKI_BOOT_URL is not configured."
+            echo "A Google-certified Android 15 6.6 boot image is required."
+            exit 1
+          fi
+
+          wget -q \
+            "${GKI_BOOT_URL}" \
+            -O gki-boot.zip
+
+          unzip -q gki-boot.zip
+
+          ./unpack_bootimg.py \
+            --boot_img boot*.img
+
+          ./mkbootimg.py \
+            --header_version 4 \
+            --os_version "${{ github.event.inputs.os_version || '15.0.0' }}" \
+            --os_patch_level "${PATCH_LEVEL}" \
+            --kernel \
+              "${GITHUB_WORKSPACE}/${KERNEL_DIR}/out/android15-6.6/dist/Image" \
+            --ramdisk out/ramdisk \
+            --output boot.img
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts
+
+          cp \
+            "${KERNEL_DIR}/out/android15-6.6/dist/Image" \
+            artifacts/Image
+
+          cp \
+            "${KERNEL_DIR}/tools/mkbootimg/boot.img" \
+            artifacts/boot.img
+
+      - name: Upload KernelSU-Next artifacts
+        uses: actions/upload-artifact@main
+        with:
+          name: kernelsu-next-android15-6.6-lts${{ github.event.inputs.os_patch_level && github.event.inputs.os_patch_level != '' && '-' || '' }}${{ github.event.inputs.os_patch_level || '' }}
+          path: artifacts/
